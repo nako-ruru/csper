@@ -9,14 +9,17 @@ import (
 	"github.com/zyedidia/generic/hashset"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type Handler struct {
 	config Config
+	rand   *rand.Rand
 }
 
 func (_this *Handler) handle(resp *http.Response) (err error) {
@@ -54,7 +57,7 @@ func (_this *Handler) handle(resp *http.Response) (err error) {
 	if _this.config.ReportTo != "" {
 		resp.Header.Set("REPORT-TO", _this.config.ReportTo)
 	}
-	if _this.config.ContentSecurityPolicy.InlineType == "" {
+	if len(_this.config.ContentSecurityPolicy.InlineTypes) == 0 {
 		if _this.config.ContentSecurityPolicy.Pattern != "" {
 			resp.Header.Set("CONTENT-SECURITY-POLICY", _this.config.ContentSecurityPolicy.Pattern)
 		}
@@ -99,6 +102,7 @@ func NewProxy(config Config) (*httputil.ReverseProxy, error) {
 	}
 	handler := &Handler{
 		config: config,
+		rand:   rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	proxy.ModifyResponse = handler.handle
 	proxy.ErrorHandler = handler.handleError
@@ -106,7 +110,7 @@ func NewProxy(config Config) (*httputil.ReverseProxy, error) {
 }
 
 func (_this *Handler) handleHeader(requiredDirectives []FetchDirective) (string, error) {
-	existingInlineRegex := regexp2.MustCompile(`'(nonce|sha\d+)-([\w\d+=/]+)'`, regexp2.None)
+	existingSourceRegex := regexp2.MustCompile(`'(nonce|sha\d+)-([\w\d+=/]+)'`, regexp2.None)
 	csp := _this.config.ContentSecurityPolicy.Pattern
 	for _, requiredDirective := range requiredDirectives {
 		directiveRegex := regexp2.MustCompile(fmt.Sprintf(`(%s)-src([^;]*)(;|$)`, requiredDirective.Type), regexp2.None)
@@ -114,40 +118,30 @@ func (_this *Handler) handleHeader(requiredDirectives []FetchDirective) (string,
 		if err != nil {
 			return "", err
 		}
-		if directiveMatch != nil {
-			existingInlineMap := make(map[string]*hashset.Set[string])
-			for existingInlineMatch, err := existingInlineRegex.FindStringMatch(directiveMatch.String()); ; existingInlineMatch, err = existingInlineRegex.FindNextMatch(existingInlineMatch) {
+
+		directiveExists := directiveMatch != nil
+		missingSources := ""
+		for _, inlineSource := range requiredDirective.InlineSources {
+			if directiveExists {
+				existingInlineMatch, err := existingSourceRegex.FindStringMatch(directiveMatch.String())
 				if err != nil {
 					return "", err
 				}
-				if existingInlineMatch == nil {
-					break
-				}
-				inlineType := existingInlineMatch.Groups()[1].String()
-				inlineValues, ok := existingInlineMap[inlineType]
-				if !ok {
-					inlineValues = hashset.New[string](10, generic.Equals[string], generic.HashString)
-					existingInlineMap[inlineType] = inlineValues
-				}
-				inlineValues.Put(existingInlineMatch.Groups()[2].String())
-			}
-			inlineText := ""
-			for _, inlineSource := range requiredDirective.InlineSources {
-				if existingInline, ok := existingInlineMap[inlineSource.Type]; ok && existingInline.Has(inlineSource.Value) {
+				if existingInlineMatch != nil {
 					continue
 				}
-				inlineText += fmt.Sprintf(` '%s-%s'`, inlineSource.Type, inlineSource.Value)
 			}
-			csp, err = directiveRegex.Replace(csp, fmt.Sprintf(`$1-src$2%s$3`, inlineText), -1, -1)
-			if err != nil {
-				panic(err)
+			missingSources += fmt.Sprintf(` '%s-%s'`, inlineSource.Type, inlineSource.Value)
+		}
+		if missingSources != "" {
+			if directiveExists {
+				csp, err = directiveRegex.Replace(csp, fmt.Sprintf(`$1-src$2%s$3`, missingSources), -1, -1)
+				if err != nil {
+					return "", err
+				}
+			} else {
+				csp += fmt.Sprintf(`; %s-src %s`, requiredDirective.Type, missingSources)
 			}
-		} else {
-			inlineText := ""
-			for _, inlineSource := range requiredDirective.InlineSources {
-				inlineText += fmt.Sprintf(` '%s-%s'`, inlineSource.Type, inlineSource.Value)
-			}
-			csp += fmt.Sprintf(`; %s-src %s`, requiredDirective.Type, inlineText)
 		}
 	}
 	return csp, nil
@@ -183,7 +177,8 @@ func (_this *Handler) handleDirectiveTags(body string) (string, []FetchDirective
 			inlineSource.Value = scriptCspMatch.Groups()[2].String()
 		} else {
 			if generator == nil {
-				generator = NewGenerator(_this.config.ContentSecurityPolicy.InlineType)
+				enabledInlineTypes := _this.config.ContentSecurityPolicy.InlineTypes
+				generator = NewGenerator(enabledInlineTypes[_this.rand.Intn(len(enabledInlineTypes))])
 			}
 			inlineSource.Type = generator.Name()
 			inlineSource.Value = generator.Generate(scriptMatchGroups[3].String())
@@ -254,11 +249,14 @@ func (_this *Handler) convertInlineHandlersToScript(body string, listeners []str
 func (_this *Handler) removeInlineHandlers(body string) (string, []string) {
 	var handlers []string
 	var (
-		uiOpenRegex         = regexp2.MustCompile(`<\s*\w+[^>]*\s+(on\w+|href)\s*=[^>]*>`, regexp2.IgnoreCase|regexp2.Singleline)
-		idRegex             = regexp2.MustCompile(`id\s*=\s*((?<quote>["'])(?<id1>.+?)\k<quote>|(?<id2>[^\s>]+))`, regexp2.IgnoreCase|regexp2.Singleline)
-		inlineListenerRegex = regexp2.MustCompile(`\s(?<event>on\w+|href)\s*=\s*((?<quote>[\"'])\s*(?<body1>.*?)\k<quote>|(?<body2>[^\s>]*))`, regexp2.IgnoreCase|regexp2.Singleline)
-		scriptBodyRegex     = regexp2.MustCompile(`\s*(?<javascript>javascript\s*:)?(?<body>.*)`, regexp2.IgnoreCase|regexp2.Singleline)
-		looseUiOpenRegex    = regexp2.MustCompile(`<(.*?)>`, regexp2.IgnoreCase|regexp2.Singleline)
+		compile = func(pattern string) *regexp2.Regexp {
+			return regexp2.MustCompile(pattern, regexp2.IgnoreCase|regexp2.Singleline)
+		}
+		uiOpenRegex         = compile(`<\s*\w+[^>]*\s+(on\w+|href)\s*=[^>]*>`)
+		idRegex             = compile(`\sid\s*=\s*((?<quote>["'])(?<id1>.+?)\k<quote>|(?<id2>[^\s>]+))`)
+		inlineListenerRegex = compile(`\s(?<event>on\w+|href)\s*=\s*((?<quote>[\"'])\s*(?<body1>.*?)\k<quote>|(?<body2>[^\s>]*))`)
+		scriptBodyRegex     = compile(`\s*(?<javascript>javascript\s*:)?(?<body>.*)`)
+		looseUiOpenRegex    = compile(`<(.*?)>`)
 	)
 	newBody, err := uiOpenRegex.ReplaceFunc(body, func(uiOpenMatch regexp2.Match) string {
 		uiOpenTag := uiOpenMatch.String()
@@ -269,6 +267,7 @@ func (_this *Handler) removeInlineHandlers(body string) (string, []string) {
 		var id, idExists, requireAppendNewId = "", false, false
 		if idMatch != nil {
 			id = defaultIfEmpty(idMatch.GroupByName("id1").String(), idMatch.GroupByName("id2").String())
+			idExists = true
 		} else {
 			id = _this.generateNewId()
 		}
@@ -324,7 +323,7 @@ document.getElementById("%s").%s = function(event) {
 }
 
 func (_this *Handler) parseBool(flag string) bool {
-	regex := regexp2.MustCompile(`^(y|t|yes|true|1)$`, regexp2.IgnoreCase)
+	regex := regexp2.MustCompile(`^(y|t|yes|true|1|on)$`, regexp2.IgnoreCase)
 	matched, err := regex.MatchString(flag)
 	if err != nil {
 		panic(err)

@@ -4,7 +4,7 @@ content-security-policy:
   pattern: "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.vaptcha.net https://*.vaptcha.com https://*.gstatic.cn https://*.gstatic.com https://*.recaptcha.net; object-src 'none'; frame-ancestors 'self'; report-uri /report; report-to csp-endpoint"
   inline-script-src: 1
   inline-style-src:
-  inline-type: nonce
+  inline-types: [nonce, sha256, sha384, sha512] # random type among inline-types
 report-to: >
   {
     "group_name": "csp-endpoint",

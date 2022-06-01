@@ -26,8 +26,10 @@ func main() {
 		panic(err)
 	}
 
-	if NewGenerator(config.ContentSecurityPolicy.InlineType) == nil {
-		panic(fmt.Errorf(`unknown generator "%s"`, config.ContentSecurityPolicy.InlineType))
+	for _, inlineType := range config.ContentSecurityPolicy.InlineTypes {
+		if NewGenerator(inlineType) == nil {
+			panic(fmt.Errorf(`unknown generator "%s"`, inlineType))
+		}
 	}
 
 	var reportUris = ReportUris(config)

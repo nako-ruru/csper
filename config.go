@@ -8,8 +8,8 @@ type Config struct {
 	ReportUris            interface{}           `yaml:"report-uris"`
 }
 type ContentSecurityPolicy struct {
-	Pattern         string `yaml:"pattern"`
-	InlineScriptSrc string `yaml:"inline-script-src"`
-	InlineStyleSrc  string `yaml:"inline-style-src"`
-	InlineType      string `yaml:"inline-type"`
+	Pattern         string   `yaml:"pattern"`
+	InlineScriptSrc string   `yaml:"inline-script-src"`
+	InlineStyleSrc  string   `yaml:"inline-style-src"`
+	InlineTypes     []string `yaml:"inline-types"`
 }
