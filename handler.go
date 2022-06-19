@@ -93,12 +93,18 @@ func NewProxy(config Config) (*httputil.ReverseProxy, error) {
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(u)
-	defaultDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		userAgent := req.UserAgent()
-		defaultDirector(req)
-		req.Header.Set("User-Agent", userAgent)
-		req.Header.Del("Accept-Encoding")
+	{
+		defaultTransport := (http.DefaultTransport).(*http.Transport).Clone()
+		defaultTransport.Proxy = nil
+		proxy.Transport = defaultTransport
+	}
+	{
+		defaultDirector := proxy.Director
+		proxy.Director = func(req *http.Request) {
+			userAgent := req.UserAgent()
+			defaultDirector(req)
+			req.Header.Set("User-Agent", userAgent)
+		}
 	}
 	handler := &Handler{
 		config: config,
