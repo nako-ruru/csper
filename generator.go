@@ -22,24 +22,24 @@ func NewGenerator(key string) Generator {
 		return &Hasher{
 			name: key,
 			hashFunc: func(bytes []byte) []byte {
-				sum256 := sha256.Sum256(bytes)
-				return sum256[:]
+				s256 := sha256.Sum256(bytes)
+				return s256[:]
 			},
 		}
 	case "sha384":
 		return &Hasher{
 			name: key,
 			hashFunc: func(bytes []byte) []byte {
-				sum256 := sha512.Sum384(bytes)
-				return sum256[:]
+				s384 := sha512.Sum384(bytes)
+				return s384[:]
 			},
 		}
 	case "sha512":
 		return &Hasher{
 			name: key,
 			hashFunc: func(bytes []byte) []byte {
-				sum256 := sha512.Sum512(bytes)
-				return sum256[:]
+				s512 := sha512.Sum512(bytes)
+				return s512[:]
 			},
 		}
 	default:
@@ -75,8 +75,8 @@ func (_this *Noncer) genNonce() string {
 }
 
 type Hasher struct {
-	name string
-	hashFunc func([]byte)[]byte
+	name         string
+	hashFunc     func([]byte) []byte
 	newlineRegex *regexp2.Regexp
 }
 
