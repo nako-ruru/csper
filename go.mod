@@ -1,6 +1,6 @@
 module csper
 
-go 1.19
+go 1.18
 
 require (
 	github.com/dlclark/regexp2 v1.4.1-0.20220502182043-8fc3b60b2721
@@ -14,5 +14,5 @@ require (
 require (
 	github.com/andybalholm/brotli v1.0.4 // indirect
 	github.com/segmentio/fasthash v1.0.3 // indirect
-	golang.org/x/exp v0.0.0-20220218215828-6cf2b201936e // indirect
+	golang.org/x/exp v0.0.0-20220613132600-b0d781184e0d // indirect
 )

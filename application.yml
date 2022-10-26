@@ -1,7 +1,13 @@
 listen: 7000
 backend: http://192.168.1.110:5000
 content-security-policy:
-  pattern: "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.vaptcha.net https://*.vaptcha.com https://*.gstatic.cn https://*.gstatic.com https://*.recaptcha.net; object-src 'none'; frame-ancestors 'self'; form-action 'self' https://*.guanghe.co https://*.qq.com https://*.microsoftonline.com https://github.com; report-uri /report; report-to csp-endpoint"
+  template: >
+    script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.vaptcha.net https://*.vaptcha.com https://*.gstatic.cn https://*.gstatic.com https://*.recaptcha.net;
+    object-src 'none';
+    frame-ancestors 'self';
+    form-action 'self' https://*.guanghe.co https://*.qq.com https://*.microsoftonline.com https://github.com;
+    report-uri /report;
+    report-to csp-endpoint;
   inline-script-src: 1
   inline-style-src:
   inline-types: [nonce, sha256, sha384, sha512] # random type among inline-types

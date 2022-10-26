@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"github.com/dlclark/regexp2"
 	"github.com/jaevor/go-nanoid"
+	"github.com/relengxing/go-multimap"
 	"github.com/relengxing/go-multimap/setmultimap"
 	"github.com/zyedidia/generic"
 	"github.com/zyedidia/generic/hashset"
 	"html"
 	"io"
-	"io/ioutil"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -27,64 +28,83 @@ type Handler struct {
 func (_this *Handler) handle(resp *http.Response) (err error) {
 	defer func() {
 		if e := recover(); e != nil {
+			var desc string
 			switch e.(type) {
 			case error:
-				err = e.(error)
+				desc = e.(error).Error()
 				break
 			default:
-				err = fmt.Errorf("%v", e)
+				desc = fmt.Sprintf("%s", e)
 			}
+			err = fmt.Errorf("%s:\n%s", desc, string(stack(3)))
 		}
 	}()
 	resp.Header.Del("Vary")
 	contentType := resp.Header.Get("Content-type")
 	contentTypeRegex := regexp2.MustCompile(`^text/htm`, regexp2.IgnoreCase)
-	matched, err := contentTypeRegex.MatchString(contentType)
-	if err != nil {
+	matched, unimportantErr := contentTypeRegex.MatchString(contentType)
+	if unimportantErr != nil {
+		log.Println(unimportantErr)
 		return
 	}
 	if !matched {
 		return
 	}
-	defer func(body io.ReadCloser) {
-		_ = body.Close()
-	}(resp.Body)
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
-	// Restore the io.ReadCloser to its original state
-	resp.Body = ioutil.NopCloser(bytes.NewBuffer(body))
 
-	if _this.config.ReportTo != "" {
+	if len(_this.config.ReportTo) > 0 {
 		resp.Header.Set("REPORT-TO", _this.config.ReportTo)
 	}
-	if len(_this.config.ContentSecurityPolicy.InlineTypes) == 0 {
-		if _this.config.ContentSecurityPolicy.Pattern != "" {
-			resp.Header.Set("CONTENT-SECURITY-POLICY", _this.config.ContentSecurityPolicy.Pattern)
+	customDirectives := resp.Header.Get("X-CUSTOM-CSP")
+	resp.Header.Del("X-CUSTOM-CSP")
+	newRespBody, csp, unimportantErr := _this.proceed(resp.Body, customDirectives)
+	if unimportantErr != nil {
+		log.Println(unimportantErr)
+	}
+	resp.Body = newRespBody
+	if len(strings.TrimSpace(csp)) > 0 {
+		resp.Header.Set("CONTENT-SECURITY-POLICY", csp)
+	}
+	return
+}
+
+func (_this *Handler) proceed(respBody io.ReadCloser, customDirectives string) (newRespBody io.ReadCloser, csp string, err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			var desc string
+			switch e.(type) {
+			case error:
+				desc = e.(error).Error()
+				break
+			default:
+				desc = fmt.Sprintf("%s", e)
+			}
+			err = fmt.Errorf("%s:\n%s", desc, string(stack(3)))
 		}
+	}()
+	newRespBody, csp = respBody, _this.config.ContentSecurityPolicy.Template
+	if len(_this.config.ContentSecurityPolicy.InlineTypes) == 0 {
 		return
 	}
 
-	newBody := _this.handleUITags(string(body))
-	newBody, requiredDirectives := _this.handleDirectiveTags(newBody)
-
-	csp, err := _this.handleHeader(requiredDirectives)
+	defer func() {
+		_ = respBody.Close()
+	}()
+	respBodyBytes, err := io.ReadAll(respBody)
 	if err != nil {
 		return
 	}
-	if strings.TrimSpace(csp) != "" {
-		resp.Header.Set("CONTENT-SECURITY-POLICY", csp)
-	}
+	newRespBody = io.NopCloser(bytes.NewBuffer(respBodyBytes))
 
-	buf := bytes.NewBufferString(newBody)
-	resp.Body = ioutil.NopCloser(buf)
+	newBody := _this.handleUITags(string(respBodyBytes))
+	newBody, requiredDirectives := _this.handleDirectiveTags(newBody)
+	csp, err = _this.handleHeader(customDirectives, requiredDirectives)
+	newRespBody = io.NopCloser(bytes.NewBufferString(newBody))
 	return
 }
 
 func (_this *Handler) handleError(writer http.ResponseWriter, _ *http.Request, err error) {
 	writer.WriteHeader(502)
-	_, _ = writer.Write([]byte(err.Error()))
+	_, _ = writer.Write([]byte(fmt.Sprintf("%+v", err)))
 }
 
 // NewProxy takes target host and creates a reverse proxy
@@ -117,8 +137,13 @@ func NewProxy(config Config) (*httputil.ReverseProxy, error) {
 	return proxy, nil
 }
 
-func (_this *Handler) handleHeader(requiredDirectiveMultimap *setmultimap.MultiMap[string, FetchDirectiveItem]) (string, error) {
-	csp := _this.config.ContentSecurityPolicy.Pattern
+func (_this *Handler) handleHeader(customDirectivesDesc string, requiredDirectiveMultimap multimap.MultiMap[string, FetchDirectiveItem]) (string, error) {
+	customDirectiveMultipmap, err := _this.directiveDescToDirectives(customDirectivesDesc)
+	if err != nil {
+		return "", err
+	}
+	requiredDirectiveMultimap = merge(requiredDirectiveMultimap, customDirectiveMultipmap)
+	csp := _this.config.ContentSecurityPolicy.Template
 	for _, directiveType := range requiredDirectiveMultimap.KeySet() {
 		directiveRegex := regexp2.MustCompile(fmt.Sprintf(`(%s)-src([^;]*)(;|$)`, directiveType), regexp2.None)
 		directiveMatch, err := directiveRegex.FindStringMatch(csp)
@@ -160,20 +185,26 @@ func (_this *Handler) handleHeader(requiredDirectiveMultimap *setmultimap.MultiM
 }
 
 func (_this *Handler) handleDirectiveTags(body string) (string, *setmultimap.MultiMap[string, FetchDirectiveItem]) {
-	tagRegex := regexp2.MustCompile(`<\s*(?<tag>script|style)(?<properties>[^>]*)>(?<body>.*?)(?<closedTag><\s*\/\s*\k<tag>\s*>)`, regexp2.IgnoreCase|regexp2.Singleline)
-	scriptNonceRegex := regexp2.MustCompile(`nonce\s*=\s*(["'])([^"']*)\1`, regexp2.IgnoreCase|regexp2.Singleline)
-	scriptSrcRegex := regexp2.MustCompile(`src\s*=\s*(["'])([^"']*)\1`, regexp2.IgnoreCase|regexp2.Singleline)
-
+	var (
+		compile = func(pattern string) *regexp2.Regexp {
+			return regexp2.MustCompile(pattern, regexp2.IgnoreCase|regexp2.Singleline)
+		}
+		tagRegex         = compile(`<\s*(?<tag>script|style)(?<properties>[^>]*)>(?<body>.*?)(?<closedTag><\s*\/\s*\k<tag>\s*>)`)
+		scriptNonceRegex = compile(`nonce\s*=\s*(["'])([^"']*)\1`)
+		scriptSrcRegex   = compile(`src\s*=\s*(["'])([^"']*)\1`)
+	)
 	var requiredDirectiveMultimap = setmultimap.New[string, FetchDirectiveItem]()
-
 	var randGenerator *RandGenerator
 	newBody, err := tagRegex.ReplaceFunc(body, func(scriptMatch regexp2.Match) string {
 		directiveType := scriptMatch.GroupByName("tag").String()
-		if directiveType == "script" && !_this.parseBool(_this.config.ContentSecurityPolicy.InlineScriptSrc) {
-			return scriptMatch.String()
-		}
-		if directiveType == "style" && !_this.parseBool(_this.config.ContentSecurityPolicy.InlineStyleSrc) {
-			return scriptMatch.String()
+		strictDynamic := _this.containsStrictDynamic(directiveType)
+		if !strictDynamic {
+			if directiveType == "script" && !parseBool(_this.config.ContentSecurityPolicy.InlineScriptSrc) {
+				return scriptMatch.String()
+			}
+			if directiveType == "style" && !parseBool(_this.config.ContentSecurityPolicy.InlineStyleSrc) {
+				return scriptMatch.String()
+			}
 		}
 
 		/*
@@ -209,7 +240,7 @@ func (_this *Handler) handleDirectiveTags(body string) (string, *setmultimap.Mul
 			}
 			scriptBody := scriptMatch.GroupByName("body").String()
 			var generator Generator
-			if scriptSrcMatch != nil && _this.containsStrictDynamic(directiveType) {
+			if scriptSrcMatch != nil {
 				//if 'strict dynamic' and src exists
 				generator = randGenerator.ReusableNoncer()
 			} else if strings.TrimSpace(scriptBody) != "" {
@@ -219,14 +250,12 @@ func (_this *Handler) handleDirectiveTags(body string) (string, *setmultimap.Mul
 			if generator != nil {
 				inlineSourceAppendingToHeader.Type = generator.Name()
 				inlineSourceAppendingToHeader.Value = generator.Generate(scriptBody)
-				appendToTag = true
+				appendToTag = generator.AppendToTags()
 			}
 		}
-
 		if inlineSourceAppendingToHeader.Type != "" {
 			requiredDirectiveMultimap.Put(directiveType, inlineSourceAppendingToHeader)
 		}
-
 		if !appendToTag {
 			return scriptMatch.String()
 		}
@@ -311,7 +340,7 @@ func (_this *Handler) removeInlineHandlers(body string) (string, []string) {
 				return inlineListenerMatch.String()
 			}
 			javascriptBody = strings.TrimSpace(scriptBodyMatch.GroupByName("body").String())
-			if javascriptBody == "" {
+			if len(javascriptBody) == 0 {
 				return inlineListenerMatch.String()
 			}
 			handlers = append(handlers, _this.convertToStandardScript(id, event, javascriptBody))
@@ -335,6 +364,26 @@ func (_this *Handler) removeInlineHandlers(body string) (string, []string) {
 		panic(err)
 	}
 	return newBody, handlers
+}
+
+func (_this *Handler) directiveDescToDirectives(directiveDesc string) (multimap.MultiMap[string, FetchDirectiveItem], error) {
+	mmap := setmultimap.New[string, FetchDirectiveItem]()
+	for _, directive := range strings.Split(directiveDesc, ";") {
+		directiveType, subDirectiveDesc, found := strings.Cut(directive, " ")
+		if found {
+			directiveType, _, found = strings.Cut(directiveType, "-")
+			if found {
+				items, err := _this.directiveDescToDirectiveItems(subDirectiveDesc)
+				if err != nil {
+					return nil, err
+				}
+				items.Each(func(item FetchDirectiveItem) {
+					mmap.Put(directiveType, item)
+				})
+			}
+		}
+	}
+	return mmap, nil
 }
 
 func (_this *Handler) directiveDescToDirectiveItems(directiveDesc string) (*hashset.Set[FetchDirectiveItem], error) {
@@ -365,16 +414,25 @@ func (_this *Handler) convertToStandardScript(id, event, inlineHandler string) s
 	if err != nil {
 		panic(err)
 	}
-	return fmt.Sprintf(`
+	var s string
+	if event == "href" {
+		s += fmt.Sprintf(`
+document.getElementById("%s").href = "#";
+`, id)
+		event = "onclick"
+	}
+	s += fmt.Sprintf(`
 document.getElementById("%s").%s = function(event) {
 	%s;
+event.preventDefault();
 };
 `, id, event, handler2)
+	return s
 }
 
 func (_this *Handler) containsStrictDynamic(directiveType string) bool {
 	patternStrictDynamicRegex := regexp2.MustCompile(`(^|;)\s*(?<directive>[^-;]+)-src\s+[^;]*'strict-dynamic'\s+[^;]*(;|$)`, regexp2.IgnoreCase|regexp2.Singleline)
-	for match, err := patternStrictDynamicRegex.FindStringMatch(_this.config.ContentSecurityPolicy.Pattern); ; match, err = patternStrictDynamicRegex.FindNextMatch(match) {
+	for match, err := patternStrictDynamicRegex.FindStringMatch(_this.config.ContentSecurityPolicy.Template); ; match, err = patternStrictDynamicRegex.FindNextMatch(match) {
 		if err != nil {
 			panic(err)
 		}
@@ -385,15 +443,6 @@ func (_this *Handler) containsStrictDynamic(directiveType string) bool {
 			return true
 		}
 	}
-}
-
-func (_this *Handler) parseBool(flag string) bool {
-	regex := regexp2.MustCompile(`^(y|t|yes|true|1|on)$`, regexp2.IgnoreCase)
-	matched, err := regex.MatchString(flag)
-	if err != nil {
-		panic(err)
-	}
-	return matched
 }
 
 func (_this *Handler) generateNewId(tag string) string {
@@ -427,9 +476,12 @@ func filter[V any](array []V, filterFunc func(V) bool) []V {
 	return missingItems
 }
 
-func defaultIfEmpty(s1, s2 string) string {
-	if s1 != "" {
-		return s1
+func merge[K comparable, V any](p, q multimap.MultiMap[K, V]) multimap.MultiMap[K, V] {
+	for _, k := range q.KeySet() {
+		v, found := q.Get(k)
+		if found {
+			p.PutAll(k, v)
+		}
 	}
-	return s2
+	return p
 }
