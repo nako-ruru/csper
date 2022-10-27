@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 )
@@ -21,12 +20,12 @@ func ReportUris(config Config) []interface{} {
 
 func NewReport() func(http.ResponseWriter, *http.Request) {
 	reportToHandler := func(rw http.ResponseWriter, req *http.Request) {
-		defer func(body io.ReadCloser) {
-			_ = body.Close()
-		}(req.Body)
-		body, err := ioutil.ReadAll(req.Body)
+		defer func() {
+			_ = req.Body.Close()
+		}()
+		body, err := io.ReadAll(req.Body)
 		if err != nil {
-			rw.WriteHeader(502)
+			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		log.Printf(string(body))

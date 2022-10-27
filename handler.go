@@ -51,18 +51,19 @@ func (_this *Handler) handle(resp *http.Response) (err error) {
 		return
 	}
 
-	if len(_this.config.ReportTo) > 0 {
-		resp.Header.Set("REPORT-TO", _this.config.ReportTo)
-	}
 	customDirectives := resp.Header.Get("X-CUSTOM-CSP")
 	resp.Header.Del("X-CUSTOM-CSP")
 	newRespBody, csp, unimportantErr := _this.proceed(resp.Body, customDirectives)
+	resp.Body = newRespBody
 	if unimportantErr != nil {
 		log.Println(unimportantErr)
-	}
-	resp.Body = newRespBody
-	if len(strings.TrimSpace(csp)) > 0 {
-		resp.Header.Set("CONTENT-SECURITY-POLICY", csp)
+	} else {
+		if len(_this.config.ReportTo) > 0 {
+			resp.Header.Set("REPORT-TO", _this.config.ReportTo)
+		}
+		if len(strings.TrimSpace(csp)) > 0 {
+			resp.Header.Set("CONTENT-SECURITY-POLICY", csp)
+		}
 	}
 	return
 }
@@ -103,7 +104,7 @@ func (_this *Handler) proceed(respBody io.ReadCloser, customDirectives string) (
 }
 
 func (_this *Handler) handleError(writer http.ResponseWriter, _ *http.Request, err error) {
-	writer.WriteHeader(502)
+	writer.WriteHeader(http.StatusBadGateway)
 	_, _ = writer.Write([]byte(fmt.Sprintf("%+v", err)))
 }
 
@@ -184,7 +185,7 @@ func (_this *Handler) handleHeader(customDirectivesDesc string, requiredDirectiv
 	return csp, nil
 }
 
-func (_this *Handler) handleDirectiveTags(body string) (string, *setmultimap.MultiMap[string, FetchDirectiveItem]) {
+func (_this *Handler) handleDirectiveTags(body string) (string, multimap.MultiMap[string, FetchDirectiveItem]) {
 	var (
 		compile = func(pattern string) *regexp2.Regexp {
 			return regexp2.MustCompile(pattern, regexp2.IgnoreCase|regexp2.Singleline)
@@ -194,7 +195,7 @@ func (_this *Handler) handleDirectiveTags(body string) (string, *setmultimap.Mul
 		scriptSrcRegex   = compile(`src\s*=\s*(["'])([^"']*)\1`)
 	)
 	var requiredDirectiveMultimap = setmultimap.New[string, FetchDirectiveItem]()
-	var randGenerator *RandGenerator
+	var generatorSession *FetchDirectiveGeneratorSession
 	newBody, err := tagRegex.ReplaceFunc(body, func(scriptMatch regexp2.Match) string {
 		directiveType := scriptMatch.GroupByName("tag").String()
 		strictDynamic := _this.containsStrictDynamic(directiveType)
@@ -211,7 +212,7 @@ func (_this *Handler) handleDirectiveTags(body string) (string, *setmultimap.Mul
 		   3 cases:
 		   1. nonce exists
 		      append to header directly
-		   2. 'strict dynamic' and src exist
+		   2. src exists
 		      generate nonce and then append to tag and header both
 		   3. body exists
 		      generate nonce or hash randomly and then append to tag and header both
@@ -235,24 +236,25 @@ func (_this *Handler) handleDirectiveTags(body string) (string, *setmultimap.Mul
 			if err != nil {
 				panic(err)
 			}
-			if randGenerator == nil {
-				randGenerator = NewRandRandGenerator(_this.config.ContentSecurityPolicy.InlineTypes, true)
-			}
 			scriptBody := scriptMatch.GroupByName("body").String()
-			var generator Generator
-			if scriptSrcMatch != nil {
-				//if 'strict dynamic' and src exists
-				generator = randGenerator.ReusableNoncer()
-			} else if strings.TrimSpace(scriptBody) != "" {
-				//if javascript inline body exists
-				generator = randGenerator.Next()
-			}
-			if generator != nil {
+			if scriptSrcMatch != nil || len(strings.TrimSpace(scriptBody)) > 0 {
+				if generatorSession == nil {
+					generatorSession = NewFetchDirectiveGeneratorSession(_this.config.ContentSecurityPolicy.InlineTypes, true)
+				}
+				var generator Generator
+				if scriptSrcMatch != nil {
+					//if src exists
+					generator = generatorSession.ReusableNoncer()
+				} else {
+					//if javascript inline body exists
+					generator = generatorSession.Next()
+				}
 				inlineSourceAppendingToHeader.Type = generator.Name()
 				inlineSourceAppendingToHeader.Value = generator.Generate(scriptBody)
 				appendToTag = generator.AppendToTags()
 			}
 		}
+
 		if inlineSourceAppendingToHeader.Type != "" {
 			requiredDirectiveMultimap.Put(directiveType, inlineSourceAppendingToHeader)
 		}
@@ -336,7 +338,7 @@ func (_this *Handler) removeInlineHandlers(body string) (string, []string) {
 				panic(err)
 			}
 			//if normal href("javascript:" is not found after "href"), return original text
-			if event == "href" && scriptBodyMatch.GroupByName("javascript").String() == "" {
+			if event == "href" && len(scriptBodyMatch.GroupByName("javascript").String()) == 0 {
 				return inlineListenerMatch.String()
 			}
 			javascriptBody = strings.TrimSpace(scriptBodyMatch.GroupByName("body").String())
@@ -414,19 +416,22 @@ func (_this *Handler) convertToStandardScript(id, event, inlineHandler string) s
 	if err != nil {
 		panic(err)
 	}
+
 	var s string
 	if event == "href" {
-		s += fmt.Sprintf(`
+		var t1 = `
 document.getElementById("%s").href = "#";
-`, id)
+`
+		s += fmt.Sprintf(t1, id)
 		event = "onclick"
 	}
-	s += fmt.Sprintf(`
+	var t2 = `
 document.getElementById("%s").%s = function(event) {
 	%s;
 event.preventDefault();
 };
-`, id, event, handler2)
+`
+	s += fmt.Sprintf(t2, id, event, handler2)
 	return s
 }
 
@@ -478,10 +483,8 @@ func filter[V any](array []V, filterFunc func(V) bool) []V {
 
 func merge[K comparable, V any](p, q multimap.MultiMap[K, V]) multimap.MultiMap[K, V] {
 	for _, k := range q.KeySet() {
-		v, found := q.Get(k)
-		if found {
-			p.PutAll(k, v)
-		}
+		v, _ := q.Get(k)
+		p.PutAll(k, v)
 	}
 	return p
 }

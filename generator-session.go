@@ -4,20 +4,20 @@ import (
 	"math/rand"
 )
 
-func NewRandRandGenerator(randomDirectiveTypes []string, reuseNonce bool) *RandGenerator {
-	return &RandGenerator{
+func NewFetchDirectiveGeneratorSession(randomDirectiveTypes []string, reuseNonce bool) *FetchDirectiveGeneratorSession {
+	return &FetchDirectiveGeneratorSession{
 		randomDirectiveTypes: randomDirectiveTypes,
 		reuseNonce:           reuseNonce,
 	}
 }
 
-type RandGenerator struct {
+type FetchDirectiveGeneratorSession struct {
 	reusableNoncer       *Noncer
 	randomDirectiveTypes []string
 	reuseNonce           bool
 }
 
-func (_this *RandGenerator) Next() Generator {
+func (_this *FetchDirectiveGeneratorSession) Next() Generator {
 	key := _this.randomDirectiveTypes[rand.Intn(len(_this.randomDirectiveTypes))]
 	if key == "nonce" && _this.reuseNonce {
 		return _this.ReusableNoncer()
@@ -25,7 +25,7 @@ func (_this *RandGenerator) Next() Generator {
 	return NewGenerator(key)
 }
 
-func (_this *RandGenerator) ReusableNoncer() Generator {
+func (_this *FetchDirectiveGeneratorSession) ReusableNoncer() Generator {
 	if _this.reusableNoncer == nil {
 		_this.reusableNoncer = NewGenerator("nonce").(*Noncer)
 	}
